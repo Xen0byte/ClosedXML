@@ -1,10 +1,40 @@
 using System;
+using System.Collections.Generic;
 
 namespace ClosedXML.Excel.CalcEngine.Functions;
 
 internal class TallyNumbers : ITally
 {
-    internal static readonly ITally Default = new TallyNumbers();
+    private readonly bool _ignoreScalarBlank;
+    private readonly bool _ignoreErrors;
+    private readonly Func<CalcContext, Reference, IEnumerable<ScalarValue>> _getNonBlankValues;
+
+    /// <summary>
+    /// Tally numbers.
+    /// </summary>
+    internal static readonly TallyNumbers Default = new();
+
+    /// <summary>
+    /// Ignore blank from scalar values. Basically used for <c>PRODUCT</c> function, so it doesn't end up with 0.
+    /// </summary>
+    internal static readonly TallyNumbers WithoutScalarBlank = new(ignoreScalarBlank: true);
+
+    /// <summary>
+    /// Tally numbers without values from cells that use <c>SUBTOTAL</c> function.
+    /// </summary>
+    internal static readonly TallyNumbers WithoutSubtotal = new(static (ctx, reference) => ctx.GetNonBlankValuesWithout("SUBTOTAL", reference));
+
+    /// <summary>
+    /// Tally numbers. Any error (including conversion), logical, text is ignored and not tallied.
+    /// </summary>
+    internal static readonly TallyNumbers IgnoreErrors  = new(ignoreErrors: true);
+
+    private TallyNumbers(Func<CalcContext, Reference, IEnumerable<ScalarValue>>? getNonBlankValues = null, bool ignoreScalarBlank = false, bool ignoreErrors = false)
+    {
+        _ignoreScalarBlank = ignoreScalarBlank;
+        _ignoreErrors = ignoreErrors;
+        _getNonBlankValues = getNonBlankValues ?? (static (ctx, reference) => ctx.GetNonBlankValues(reference));
+    }
 
     /// <summary>
     /// The method tries to convert scalar arguments to numbers, but ignores non-numbers in
@@ -18,21 +48,34 @@ internal class TallyNumbers : ITally
         {
             if (arg.TryPickScalar(out var scalar, out var collection))
             {
+                if (_ignoreScalarBlank && scalar.IsBlank)
+                    continue;
+
                 // Scalars are converted to number.
                 if (!scalar.ToNumber(ctx.Culture).TryPickT0(out var number, out var error))
+                {
+                    if (_ignoreErrors)
+                        continue;
+
                     return error;
+                }
 
                 tally = tally.Tally(number);
             }
             else
             {
                 var valuesIterator = !collection.TryPickT0(out var array, out var reference)
-                    ? ctx.GetNonBlankValues(reference)
+                    ? _getNonBlankValues(ctx, reference)
                     : array;
                 foreach (var value in valuesIterator)
                 {
                     if (value.TryPickError(out var error))
+                    {
+                        if (_ignoreErrors)
+                            continue;
+
                         return error;
+                    }
 
                     // For arrays and references, only the number type is used. Other types are ignored.
                     if (value.TryPickNumber(out var number))
